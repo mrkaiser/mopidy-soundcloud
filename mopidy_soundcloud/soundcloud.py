@@ -90,7 +90,7 @@ class SoundCloudClient(object):
             web_tracks = self._get(
                 'explore/%s?tag=%s&limit=%s&offset=0&linked_partitioning=1' %
                 (urn, quote_plus(explore.get('tag')), self.explore_songs),
-                'api-web'
+                'api-v2'
             )
             tracks = []
             for track in web_tracks.get('tracks'):
@@ -98,6 +98,19 @@ class SoundCloudClient(object):
             return tracks
 
         return explore.get('categories').get('music')
+
+    def get_groups(self, query_group_id=None):
+
+        if query_group_id:
+            web_tracks = self._get('groups/%d/tracks.json' % int(
+                query_group_id))
+            tracks = []
+            for track in web_tracks:
+                if 'track' in track.get('kind'):
+                    tracks.append(self.parse_track(track))
+            return tracks
+        else:
+            return self._get('me/groups.json')
 
     def get_followings(self, query_user_id=None):
 
