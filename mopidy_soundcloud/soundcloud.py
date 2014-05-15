@@ -5,12 +5,34 @@ import string
 import time
 from urllib import quote_plus
 import collections
-
-import requests
-from mopidy.models import Track, Artist, Album
 import unicodedata
 
+import requests
+
+from mopidy.models import Track, Artist, Album
+
+
 logger = logging.getLogger(__name__)
+
+
+def safe_url(uri):
+    return quote_plus(unicodedata.normalize(
+        'NFKD',
+        unicode(uri)
+    ).encode('ASCII', 'ignore'))
+
+
+def readable_url(uri):
+    valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
+    safe_uri = unicodedata.normalize(
+        'NFKD',
+        unicode(uri)
+    ).encode('ASCII', 'ignore')
+    return re.sub(
+        '\s+',
+        ' ',
+        ''.join(c for c in safe_uri if c in valid_chars)
+    ).strip()
 
 
 class cache(object):
@@ -29,8 +51,7 @@ class cache(object):
             try:
                 value, last_update = self.cache[args]
                 age = now - last_update
-                if (self._call_count >= self.ctl
-                        or age > self.ttl):
+                if self._call_count >= self.ctl or age > self.ttl:
                     self._call_count = 1
                     raise AttributeError
 
@@ -130,7 +151,12 @@ class SoundCloudClient(object):
             users.append((name, user_id))
         return users
 
-    def get_sets(self, query_set_id=None):
+    @cache()
+    def get_set(self, set_id):
+        playlist = self._get('playlists/%s.json' % set_id)
+        return playlist.get('tracks', [])
+
+    def get_sets(self):
         playable_sets = []
         for playlist in self._get('me/playlists.json?limit=1000'):
             name = playlist.get('title')
@@ -141,13 +167,24 @@ class SoundCloudClient(object):
                     name, set_id, len(tracks)
                 )
             )
-            if query_set_id == set_id:
-                return tracks
             playable_sets.append((name, set_id, tracks))
         return playable_sets
 
     def get_user_liked(self):
-        return self.parse_results(self._get('me/favorites.json?limit=1000'))
+        # Note: As with get_user_stream, this API call is undocumented.
+        likes = []
+        liked = self._get('e1/me/likes.json?limit=1000')
+        for data in liked:
+
+            track = data['track']
+            if track:
+                likes.append(self.parse_track(track))
+
+            pl = data['playlist']
+            if pl:
+                likes.append((pl['title'], str(pl['id'])))
+
+        return likes
 
     # Public
     @cache()
@@ -196,22 +233,13 @@ class SoundCloudClient(object):
 
         url = 'https://%s.soundcloud.com/%s' % (endpoint, url)
 
-        logger.debug('Requesting %s' % url)
+        logger.info('Requesting %s' % url)
         res = self.http_client.get(url)
         res.raise_for_status()
         return res.json()
 
     def sanitize_tracks(self, tracks):
         return filter(None, tracks)
-
-    def safe_url(self, uri):
-        valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
-        safe_uri = unicodedata.normalize('NFKD', uri).encode(
-            'ASCII', 'ignore'
-        )
-        return re.sub('\s+', ' ',
-                      ''.join(c for c in safe_uri if c in valid_chars)
-                      ).strip()
 
     @cache()
     def parse_track(self, data, remote_url=False):
@@ -235,17 +263,11 @@ class SoundCloudClient(object):
 
         if 'title' in data:
             name = data['title']
+            label_name = data.get('label_name')
 
-            # NOTE On some clients search UI would group results by artist
-            # thus prevent user from selecting track
-
-            if ' - ' in name:
-                name = name.split(' - ')
-                track_kwargs[b'name'] = name[1]
-                artist_kwargs[b'name'] = name[0]
-            elif 'label_name' in data and data['label_name'] != '':
+            if bool(label_name):
                 track_kwargs[b'name'] = name
-                artist_kwargs[b'name'] = data['label_name']
+                artist_kwargs[b'name'] = label_name
             else:
                 track_kwargs[b'name'] = name
                 artist_kwargs[b'name'] = data.get('user').get('username')
@@ -264,7 +286,7 @@ class SoundCloudClient(object):
             track_kwargs[b'uri'] = self.get_streamble_url(data['stream_url'])
         else:
             track_kwargs[b'uri'] = 'soundcloud:song/%s.%s' % (
-                self.safe_url(data.get('title')), data.get('id')
+                readable_url(data.get('title')), data.get('id')
             )
 
         track_kwargs[b'length'] = int(data.get('duration', 0))
@@ -279,15 +301,13 @@ class SoundCloudClient(object):
                 album_kwargs[b'images'] = [data['artwork_url']]
             else:
                 image = data.get('user').get('avatar_url')
-                if image:
-                    album_kwargs[b'images'] = [image]
-                else:
-                    album_kwargs[b'images'] = []
+                album_kwargs[b'images'] = [image]
 
             album = Album(**album_kwargs)
             track_kwargs[b'album'] = album
 
         track = Track(**track_kwargs)
+        print track
         return track
 
     @cache()

@@ -2,29 +2,15 @@ from __future__ import unicode_literals
 import collections
 import logging
 import re
-import string
 import urllib
 from urlparse import urlparse
-import unicodedata
 
 from mopidy import backend, models
 from mopidy.models import SearchResult, Track
+from mopidy_soundcloud.soundcloud import safe_url
 
 
 logger = logging.getLogger(__name__)
-
-
-def safe_url(uri):
-    valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
-    safe_uri = unicodedata.normalize(
-        'NFKD',
-        unicode(uri)
-    ).encode('ASCII', 'ignore')
-    return re.sub(
-        '\s+',
-        ' ',
-        ''.join(c for c in safe_uri if c in valid_chars)
-    ).strip()
 
 
 def generate_uri(path):
@@ -64,6 +50,21 @@ class SoundCloudLibraryProvider(backend.LibraryProvider):
             logger.debug('Adding set %s to vfs' % sets_list.name)
             sets_vfs[set_id] = sets_list
         return sets_vfs.values()
+
+    def list_liked(self):
+        vfs_list = collections.OrderedDict()
+        for data in self.backend.remote.get_user_liked():
+            try:
+                name, set_id = data
+            except (TypeError, ValueError):
+                logger.debug('Adding liked track %s to vfs' % data.name)
+                vfs_list[data.name] = models.Ref.track(
+                    uri=data.uri, name=data.name
+                )
+            else:
+                logger.debug('Adding liked playlist %s to vfs' % name)
+                vfs_list[set_id] = new_folder(name, ['sets', set_id])
+        return vfs_list.values()
 
     def list_user_follows(self):
         sets_vfs = collections.OrderedDict()
@@ -114,7 +115,7 @@ class SoundCloudLibraryProvider(backend.LibraryProvider):
             if 'sets' == req_type:
                 if res_id:
                     return self.tracklist_to_vfs(
-                        self.backend.remote.get_sets(res_id)
+                        self.backend.remote.get_set(res_id)
                     )
                 else:
                     return self.list_sets()
@@ -144,9 +145,7 @@ class SoundCloudLibraryProvider(backend.LibraryProvider):
                     return self.list_groups()
             # Liked
             if 'liked' == req_type:
-                return self.tracklist_to_vfs(
-                    self.backend.remote.get_user_liked()
-                )
+                return self.list_liked()
             # User stream
             if 'stream' == req_type:
                 return self.tracklist_to_vfs(
@@ -171,7 +170,7 @@ class SoundCloudLibraryProvider(backend.LibraryProvider):
                     tracks=self.backend.remote.resolve_url(search_query)
                 )
         else:
-            search_query = ' '.join(query.values())
+            search_query = ' '.join(query.values()[0])
             logger.info('Searching SoundCloud for \'%s\'', search_query)
             return SearchResult(
                 uri='soundcloud:search',
@@ -179,9 +178,13 @@ class SoundCloudLibraryProvider(backend.LibraryProvider):
             )
 
     def lookup(self, uri):
-        try:
-            track_id = self.backend.remote.parse_track_uri(uri)
-            return [self.backend.remote.get_track(track_id)]
-        except Exception as error:
-            logger.error('Failed to lookup %s: %s', uri, error)
-            return []
+        if 'sc:' in uri:
+            uri = uri.replace('sc:', '')
+            return self.backend.remote.resolve_url(uri)
+        else:
+            try:
+                track_id = self.backend.remote.parse_track_uri(uri)
+                return [self.backend.remote.get_track(track_id)]
+            except Exception as error:
+                logger.error('Failed to lookup %s: %s', uri, error)
+                return []
